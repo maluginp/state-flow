@@ -2,7 +2,7 @@ package ru.maluginp.statesteps.steps
 
 import android.os.Bundle
 import android.util.Log
-import kotlinx.android.synthetic.main.activity_main.view.*
+import io.reactivex.Single
 import ru.maluginp.statesteps.DetailsFragment
 import ru.maluginp.statesteps.MainActivity
 import ru.maluginp.statesteps.R
@@ -11,15 +11,108 @@ import ru.maluginp.statesteps.R
 interface Step {
     // async process
     fun begin()
-    fun commit() // How to check step is processed or not, async process
+    fun commit(): CommitResult
     fun rollback()
 }
 
 
 //typealias StepReducer = (bundle: Bundle?) -> Bundle
 
+typealias RxJavaCallback = (Bundle?) -> Unit
+
+sealed class CommitResult {
+    object Done : CommitResult()
+    object NextStep: CommitResult()
+}
+
+class RxJavaStep(
+    private val parentFlow: Flow,
+    private val key: String
+) : Step {
+
+    override fun begin() {
+        Log.d("Flow", "RxJava $key begin")
+        Single.just("test")
+            .subscribe { t ->  parentFlow.onAsyncNext(null) }
+    }
+
+    override fun commit(): CommitResult {
+        Log.d("Flow", "RxJava $key commit")
+        return CommitResult.Done
+    }
+
+    override fun rollback() {
+        Log.d("Flow", "RxJava $key Rollback")
+    }
+}
 
 interface ScreenStep : Step {
+}
+
+class ConditionalStep(
+    private val parentFlow: Flow,
+    private val initialize: ConditionalStep.() -> Unit
+) : Step {
+    var activated: Boolean = false
+    var nextStep: Step? = null
+
+    fun activate(activate: Boolean, step: Step) {
+        if (!activated) {
+
+            if (activate) {
+                activated = true
+                nextStep = step
+            }
+
+        }
+    }
+
+    override fun begin() {
+        initialize()
+
+        nextStep?.begin()
+
+        parentFlow.next(null)
+    }
+
+    override fun commit(): CommitResult {
+        return nextStep?.commit() ?: CommitResult.Done
+    }
+
+    override fun rollback() {
+        nextStep?.rollback()
+    }
+
+
+}
+
+
+class FlowStep(private val initialize: FlowStep.() -> Unit) : Flow(), Step  {
+    init {
+        Log.d("Flow", "Initialze Flow Step")
+        initialize()
+    }
+
+    override fun begin() {
+
+    }
+
+    override fun commit(): CommitResult {
+        next()
+
+        val completed = isCompleted
+
+        return if (completed) {
+            CommitResult.Done
+        } else {
+            CommitResult.NextStep
+        }
+    }
+
+    override fun rollback() {
+        steps.map { it.rollback() }
+    }
+
 }
 
 class OpenDetailsScreenStep(private val activity: MainActivity, private val key: String) : ScreenStep {
@@ -32,8 +125,9 @@ class OpenDetailsScreenStep(private val activity: MainActivity, private val key:
             .commitAllowingStateLoss()
     }
 
-    override fun commit() {
+    override fun commit(): CommitResult {
         Log.d("Flow","Commit $key")
+        return CommitResult.Done
     }
 
     override fun rollback() {
@@ -41,104 +135,56 @@ class OpenDetailsScreenStep(private val activity: MainActivity, private val key:
     }
 }
 
-// Back ?
+class NothingStep : Step {
+    override fun begin() {
+    }
 
-//typealias WhenInFlow = WhenFlow.() -> Unit
-////typealias
-//
-//class WhenFlow {
-//    fun Check(activate: Boolean, check: WhenInFlow) {
-//        if (activate) {
-//            check()
-//        }
-//    }
-//}
+    override fun commit(): CommitResult {
+        return CommitResult.Done
+    }
 
-//interface INode {
-//    var prev: INode?
-//    var next: INode?
-//    val step: ScreenStep
-//}
-//
-//data class Node(
-//    override var prev: INode?,
-//    override var next: INode?,
-//    override val step: ScreenStep
-//) : INode
-//
-//data class _Condition (
-//    val cond:(() -> Boolean),
-//    val node: INode
-//)
-//
-//class ConditionalNode(
-//    private var conds: List<_Condition>,
-//    override var prev: INode?,
-//) : INode {
-//
-//    override val step: ScreenStep = NothingScreenStep()
-//
-//    override var next: INode?
-//        get() = conds.firstOrNull { it.cond() }?.node
-//        set(value) {
-//
-//        }
-//}
+    override fun rollback() {
+    }
+}
 
 abstract class Flow {
     protected val state: Bundle = Bundle()
-    private val steps: MutableList<ScreenStep> = mutableListOf()
-    private var position = -1
-
-    abstract fun flow()
-
-//    fun When(block: WhenFlow.() -> Unit) {
-//        val flow = WhenFlow()
-//
-//        flow.block()
-//
-//    }
+    protected val steps: MutableList<Step> = mutableListOf()
+    private var position = 0
 
     fun Screen(step: ScreenStep) {
         steps.add(step)
-//
-//        val node = Node(cursorNode, null, step)
-//        cursorNode.next = node
-//        cursorNode = node
     }
 
-//    fun Screen(step: ScreenStep, reducer: StepReducer) {
-//
-//    }
+    open fun RxJava(key: String) {
+        steps.add(RxJavaStep(this, key))
+    }
 
+    fun Conditional(block: ConditionalStep.() -> Unit) {
+        val step = ConditionalStep(this, block)
+        steps.add(step)
+    }
 
-    // step -> step ->
-
-    // steps ->
+    private var currentStep: Step? = null
 
     fun next(bundle: Bundle? = null) {
         Log.d("Flow", "Flow next($position)")
 
-        if (position == steps.size) {
-            steps[position-1].commit()
-        }
+        if (currentStep != null) {
+            val res = currentStep?.commit()
 
-        position++
-
-        when {
-            position == 0 -> steps[position].begin()
-            position > 0 && position < steps.size -> {
-                steps[position-1].commit()
-                steps[position].begin()
-            }
-            else -> {
-                Log.d("Flow", "Miss next, onCompleted")
-                return@next
+            when (res) {
+                is CommitResult.NextStep -> return
+                is CommitResult.Done -> position++
             }
         }
 
+        if (position >= steps.size) {
+            return
+        }
 
-
+        currentStep = steps[position]
+        currentStep?.begin()
 
         // get current step
         // reduce for state
@@ -163,65 +209,54 @@ abstract class Flow {
         position--
     }
 
+    fun onAsyncNext(bundle: Bundle?) {
+        next(bundle)
+    }
+
     val isCompleted: Boolean
         get() = position >= steps.size
 }
 
+
 class CreditFlow(private val activity: MainActivity) : Flow() {
-    override fun flow() {
+
+    init {
+        RxJava("Rx1")
+
         Screen(OpenDetailsScreenStep(activity, "Key1"))
 
-        Screen(OpenDetailsScreenStep(activity,"Key2"))
+        Conditional {
+            activate(true, FlowStep{
+                RxJava("Rx2.1")
+                Screen(OpenDetailsScreenStep(activity,"Key2"))
+                Screen(OpenDetailsScreenStep(activity,"Key3"))
+
+                Conditional {
+                    activate(true, FlowStep {
+                        RxJava("Rx3.1")
+                        Screen(OpenDetailsScreenStep(activity,"Key4"))
+
+                        Conditional {
+                            activate(true, FlowStep {
+                                Screen(OpenDetailsScreenStep(activity, "Key5"))
+                                RxJava("Rx4.1")
+                            })
+                        }
+
+                    })
+                }
+
+
+//                RxJava("Rx2.2")
+            })
+
+        }
+
+        RxJava("Rx5")
+
+        Screen(OpenDetailsScreenStep(activity,"Key6"))
+
+        RxJava("Rx6")
     }
 }
 
-//class CreditFlow : Flow() {
-//    fun flow() {
-//        Screen(OpenDetailsScreenStep())
-//
-//        When {
-//            Check(state.getBoolean("test")) {
-//                Screen(OpenDetailsScreenStep())
-//            }
-//
-//            Check (state.getBoolean("test2")) {
-//                Screen(OpenDetailsScreenStep())
-//            }
-//
-//            Check(true) {
-//                Screen(OpenDetailsScreenStep())
-//            }
-//        }
-//    }
-////    state = InitialState,
-//
-////    ScreenStep(
-////
-////        reducer { output -> state }
-////    ),
-////
-////    RxJavaStep(
-////    )
-////
-////    WhenFlow (
-////        state -> WhenFlow (
-////            Step (reducer -> ),
-////            Step (reducer -> )
-////        ),
-////        state -> Y_Step (
-////            Step ()
-////        ),
-////        state -> Z_Step (
-////           Step ()
-////        )
-////    )
-////
-////    ScreenStep(
-////
-////        reducer { }
-////    ),
-////
-////    onCompleted() {
-////
-////    }
-//}

@@ -15,14 +15,11 @@ class MainActivity : AppCompatActivity(), DetailsCallback {
         setContentView(R.layout.activity_main)
 
         flow = CreditFlow(this@MainActivity)
-        flow.flow()
-
 
         findViewById<TextView>(R.id.btnRestart)?.setOnClickListener {
             Log.d("Flow", "Restart Flow")
 
             flow = CreditFlow(this@MainActivity)
-            flow.flow() // Workaround
         }
 
         findViewById<TextView>(R.id.btnNext)?.setOnClickListener {
