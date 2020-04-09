@@ -111,6 +111,7 @@ class FlowStep(private val initialize: FlowStep.() -> Unit) : Flow(), Step  {
 
     override fun rollback() {
         steps.map { it.rollback() }
+        position = 0
     }
 
 }
@@ -150,7 +151,7 @@ class NothingStep : Step {
 abstract class Flow {
     protected val state: Bundle = Bundle()
     protected val steps: MutableList<Step> = mutableListOf()
-    private var position = 0
+    protected var position = 0
 
     fun Screen(step: ScreenStep) {
         steps.add(step)
@@ -170,6 +171,11 @@ abstract class Flow {
     fun next(bundle: Bundle? = null) {
         Log.d("Flow", "Flow next($position)")
 
+        if (position == -1) {
+            position = 0 // workaround for prev
+        }
+
+
         if (currentStep != null) {
             val res = currentStep?.commit()
 
@@ -180,6 +186,7 @@ abstract class Flow {
         }
 
         if (position >= steps.size) {
+            currentStep = null
             return
         }
 
